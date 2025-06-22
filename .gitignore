@@ -1,0 +1,11 @@
+# Node.js
+node_modules/
+
+# Python
+venv/
+
+# OS / Editor
+.DS_Store
+*.log
+__pycache__/
+*.pyc
