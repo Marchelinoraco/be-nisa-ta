@@ -7,6 +7,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.metrics import accuracy_score, precision_score, recall_score, confusion_matrix, classification_report
+import time
 
 from utils.preprocessing import (
     cleaningText,
@@ -38,14 +39,64 @@ MODEL_PATH = os.path.join(MODEL_FOLDER, 'naive_bayes_model.pkl')
 @app.route("/admin/upload", methods=["POST"])
 def upload_dataset():
     if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-    
-    file = request.files['file']
-    if not file.filename.endswith('.csv'):
-        return jsonify({'error': 'Hanya File CSV yang diterima'}), 400
+        return jsonify({'error': 'Tidak ada file yang diunggah'}), 400
 
-    file.save(DATA_PATH)
-    return jsonify({'message': 'Berhasil upload datasets'})
+    file = request.files['file']
+
+    if not file.filename.endswith('.csv'):
+        return jsonify({'error': 'Hanya file CSV yang diterima'}), 400
+
+    try:
+        # Baca file CSV ke DataFrame
+        df = pd.read_csv(file)
+        print("📥 Kolom CSV yang diterima:", df.columns.tolist())
+
+        # Validasi kolom wajib
+        required_columns = {"teks", "emosi"}
+        if not required_columns.issubset(df.columns.str.lower()):
+            return jsonify({
+                "error": "File CSV harus memiliki kolom 'teks' dan 'emosi'",
+                "found_columns": df.columns.tolist()
+            }), 400
+
+        # Rename untuk konsistensi
+        df = df.rename(columns={
+            "teks": "full_text",
+            "emosi": "emotion"
+        })
+
+        # Mapping label dari Bahasa Indonesia ke label training
+        label_mapping = {
+            "senang": "joy",
+            "takut": "fear",
+            "marah": "anger",
+            "sedih": "sadness",
+            "percaya": "trust",
+            "terkejut": "surprise",
+            "netral": "neutral"
+        }
+
+        # Normalisasi label
+        df["emotion"] = df["emotion"].astype(str).str.strip().str.lower().map(label_mapping)
+
+        # Cek jika ada label yang tidak dikenali
+        if df["emotion"].isnull().any():
+            invalid = df[df["emotion"].isnull()]
+            return jsonify({
+                "error": "Terdapat label emosi yang tidak dikenali.",
+                "invalid_labels": invalid["emotion"].tolist(),
+                "invalid_rows": invalid.to_dict(orient="records")
+            }), 400
+
+        # Simpan ke file CSV
+        df.to_csv(DATA_PATH, index=False)
+
+        return jsonify({'message': '✅ Dataset berhasil diunggah dan diproses!'})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Terjadi kesalahan saat membaca file: {str(e)}"}), 500
 
 
 @app.route("/admin/preview", methods=["GET"])
@@ -65,7 +116,7 @@ def preview_preprocessed():
     if not os.path.exists(DATA_PATH):
         return jsonify({'error': 'No dataset uploaded'}), 400
 
-    df = pd.read_csv(DATA_PATH).head(5)  # 👈 batasi di awal!
+    df = pd.read_csv(DATA_PATH).head(20)  # 👈 batasi di awal!
 
     df['text_clean'] = df['full_text'].apply(cleaningText)
     df['text_casefoldingText'] = df['text_clean'].apply(casefoldingText)
@@ -76,15 +127,17 @@ def preview_preprocessed():
     df['text_final'] = df['text_steming'].apply(toSentence)
 
     preview = df[[
-        'full_text',
-        'text_clean',
-        'text_casefoldingText',
-        'text_slangwords',
-        'text_token',
-        'text_stop',
-        'text_steming',
-        'text_final'
-    ]]
+    'full_text',
+    'emotion',  # ✅ WAJIB ditambahkan di sini
+    'text_clean',
+    'text_casefoldingText',
+    'text_slangwords',
+    'text_token',
+    'text_stop',
+    'text_steming',
+    'text_final'
+]]
+
 
     return jsonify(preview.to_dict(orient='records'))
 
@@ -95,81 +148,80 @@ def train_model():
     if not os.path.exists(DATA_PATH):
         return jsonify({'error': 'Tidak ada dataset yang di upload'}), 400
 
-    import time
     start_all = time.time()
 
-    # Ambil rasio split dari request (default 0.8)
     split_ratio = request.json.get("split_ratio", 0.8)
     try:
         split_ratio = float(split_ratio)
-        assert 0.5 <= split_ratio <= 0.95  # Validasi batas
+        assert 0.5 <= split_ratio <= 0.95
     except:
-        return jsonify({"error": "Nilai split_ratio tidak valid (range 0.5 - 0.95)"}), 400
+        return jsonify({"error": "split_ratio harus antara 0.5 - 0.95"}), 400
 
-    # Load dataset
     df = pd.read_csv(DATA_PATH)
+
+    # 🔥 Batasi jumlah data (misalnya 1000 baris) untuk debugging/percepatan
+    df = df.head(11500)
+
     if 'full_text' not in df.columns or 'emotion' not in df.columns:
-        return jsonify({'error': 'Dataset must contain "full_text" and "emotion" columns'}), 400
+        return jsonify({'error': 'Dataset harus memiliki kolom full_text dan emotion'}), 400
+
+    print("📦 Jumlah data:", len(df))
 
     # --- Preprocessing ---
     start = time.time()
     df['text_clean'] = df['full_text'].apply(cleaningText)
-    df['text_casefoldingText'] = df['text_clean'].apply(casefoldingText)
-    df['text_slangwords'] = df['text_casefoldingText'].apply(fix_slangwords)
-    df['text_token'] = df['text_slangwords'].apply(tokenizingText)
+    df['text_casefolding'] = df['text_clean'].apply(casefoldingText)
+    df['text_slang'] = df['text_casefolding'].apply(fix_slangwords)
+    df['text_token'] = df['text_slang'].apply(tokenizingText)
     df['text_stop'] = df['text_token'].apply(filteringText)
-    df['text_steming'] = df['text_stop'].apply(toSentence)
-    df['text_final'] = df['text_steming']
-    print("✅ Preprocessing done in", time.time() - start, "seconds")
+    df['text_stem'] = df['text_stop'].apply(stemmingText)
+    df['text_final'] = df['text_stem'].apply(toSentence)
+    print("✅ Preprocessing selesai dalam", round(time.time() - start, 2), "detik")
 
     df = df.dropna(subset=['text_final', 'emotion'])
 
     X = df['text_final']
     y = df['emotion']
 
-    # --- TF-IDF Vectorizer ---
+    # --- TF-IDF ---
     start = time.time()
-    tfidf = TfidfVectorizer(max_features=5000)
+    tfidf = TfidfVectorizer(max_features=5000)  # 💡 Turunkan dari 5000 → 1500
     X_tfidf = tfidf.fit_transform(X)
-    print("✅ TF-IDF done in", time.time() - start, "seconds")
+    print("🧠 TF-IDF selesai dalam", round(time.time() - start, 2), "detik")
 
-    # --- Splitting dataset dengan rasio dinamis ---
-    test_size = 1 - split_ratio
+    # --- Split & Train ---
     X_train, X_test, y_train, y_test = train_test_split(
-        X_tfidf, y, test_size=test_size, random_state=42
+        X_tfidf, y, test_size=1 - split_ratio, random_state=42
     )
 
-    # --- Training Model ---
     start = time.time()
     model = MultinomialNB()
     model.fit(X_train, y_train)
-    print("✅ Training done in", time.time() - start, "seconds")
+    print("🔁 Training selesai dalam", round(time.time() - start, 2), "detik")
 
     # --- Evaluasi ---
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
     precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
     recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
-
     cm = confusion_matrix(y_test, y_pred, labels=model.classes_)
-    cm_labels = model.classes_.tolist()
     report = classification_report(y_test, y_pred, output_dict=True)
 
-    # --- Simpan model dan vectorizer ---
+    # --- Save model ---
     joblib.dump(tfidf, VECTORIZER_PATH)
     joblib.dump(model, MODEL_PATH)
 
-    print("✅ All done in", time.time() - start_all, "seconds")
+    print("🎯 Training selesai TOTAL:", round(time.time() - start_all, 2), "detik")
 
     return jsonify({
-        'message': f'Training model berhasil dan tersimpan dengan split data {int(split_ratio * 100)}:{int((1 - split_ratio) * 100)}',
-        'accuracy': round(accuracy, 4),
-        'precision': round(precision, 4),
-        'recall': round(recall, 4),
-        'report': report,
-        'confusion_matrix': {
-            'labels': cm_labels,
-            'matrix': cm.tolist()
+        "message": "✅ Training berhasil!",
+        "accuracy": round(accuracy, 4),
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "report": report,
+        "confusion_matrix": {
+            "labels": model.classes_.tolist(),
+            "matrix": cm.tolist()
         }
     })
 
@@ -299,6 +351,9 @@ def predict_emotion():
 
         # --- Ambil label dengan probabilitas tertinggi ---
         pred_label = max(final_probabilities.items(), key=lambda x: x[1])[0]
+        
+        print("✅ Kata 'senang' di vocab?", 'senang' in tfidf.vocabulary_)
+
 
         return jsonify({
             "text": text_input,
@@ -310,6 +365,7 @@ def predict_emotion():
             "tfidf_detail": tfidf_detail,
             "step_by_step": step_by_step,
             "prior_detail": prior_detail
+            
         })
 
     except Exception as e:
@@ -320,4 +376,5 @@ def predict_emotion():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    app.run(debug=True, port=5001, threaded=True)
+
