@@ -24,7 +24,12 @@ nltk.download('stopwords')
 nltk.download('punkt')
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+
+CORS(app, resources={
+    r"/*": {
+        "origins": ["http://localhost:3000", "http://localhost:3001"]
+    }
+})
 
 UPLOAD_FOLDER = 'uploads'
 MODEL_FOLDER = 'models'
